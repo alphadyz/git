@@ -75,7 +75,7 @@ struct packed_ref_store {
 	 * "packed-refs" file. Note that this (and thus the enclosing
 	 * `packed_ref_store`) must not be freed.
 	 */
-	struct tempfile tempfile;
+	struct tempfile *tempfile;
 };
 
 struct ref_store *packed_ref_store_create(const char *path,
@@ -497,8 +497,9 @@ int packed_refs_lock(struct ref_store *ref_store, int flags, struct strbuf *err)
 		return -1;
 	}
 
-	if (close_lock_file(&refs->lock)) {
+	if (close_lock_file_gently(&refs->lock)) {
 		strbuf_addf(err, "unable to close %s: %s", refs->path, strerror(errno));
+		rollback_lock_file(&refs->lock);
 		return -1;
 	}
 
@@ -587,7 +588,8 @@ static int write_with_updates(struct packed_ref_store *refs,
 	packed_refs_path = get_locked_file_path(&refs->lock);
 	strbuf_addf(&sb, "%s.new", packed_refs_path);
 	free(packed_refs_path);
-	if (create_tempfile(&refs->tempfile, sb.buf) < 0) {
+	refs->tempfile = create_tempfile(sb.buf);
+	if (!refs->tempfile) {
 		strbuf_addf(err, "unable to create file %s: %s",
 			    sb.buf, strerror(errno));
 		strbuf_release(&sb);
@@ -595,7 +597,7 @@ static int write_with_updates(struct packed_ref_store *refs,
 	}
 	strbuf_release(&sb);
 
-	out = fdopen_tempfile(&refs->tempfile, "w");
+	out = fdopen_tempfile(refs->tempfile, "w");
 	if (!out) {
 		strbuf_addf(err, "unable to fdopen packed-refs tempfile: %s",
 			    strerror(errno));
@@ -732,11 +734,12 @@ static int write_with_updates(struct packed_ref_store *refs,
 		goto error;
 	}
 
-	if (close_tempfile(&refs->tempfile)) {
+	if (close_tempfile_gently(refs->tempfile)) {
 		strbuf_addf(err, "error closing file %s: %s",
-			    get_tempfile_path(&refs->tempfile),
+			    get_tempfile_path(refs->tempfile),
 			    strerror(errno));
 		strbuf_release(&sb);
+		delete_tempfile(&refs->tempfile);
 		return -1;
 	}
 
@@ -744,7 +747,7 @@ static int write_with_updates(struct packed_ref_store *refs,
 
 write_error:
 	strbuf_addf(err, "error writing to %s: %s",
-		    get_tempfile_path(&refs->tempfile), strerror(errno));
+		    get_tempfile_path(refs->tempfile), strerror(errno));
 
 error:
 	if (iter)
@@ -769,7 +772,7 @@ static void packed_transaction_cleanup(struct packed_ref_store *refs,
 	if (data) {
 		string_list_clear(&data->updates, 0);
 
-		if (is_tempfile_active(&refs->tempfile))
+		if (is_tempfile_active(refs->tempfile))
 			delete_tempfile(&refs->tempfile);
 
 		if (data->own_lock && is_lock_file_locked(&refs->lock)) {
